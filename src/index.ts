@@ -36,8 +36,8 @@ async function main(): Promise<void> {
           continue;
         }
         const result = await runArbitrage(wallet, opp);
-        if (result.step1 && result.step2) {
-          console.log("交易已上链:", result.signature1, result.signature2);
+        if (result.step1 && result.step2 && result.step3) {
+          console.log("交易已上链:", result.signature1, result.signature2, result.signature3);
         }
       } else {
         console.log("  本轮未发现满足条件的套利机会");
