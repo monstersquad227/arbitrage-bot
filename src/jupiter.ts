@@ -8,13 +8,18 @@ import { HttpsProxyAgent } from "https-proxy-agent";
 import {
   JUPITER_API_BASE,
   JUPITER_API_KEY,
+  JUPITER_QUOTE_API_BASE,
   MAX_SLIPPAGE_BPS,
   PRIVATE_KEY_B58,
   PROXY_URL,
   REQUEST_TIMEOUT_MS,
-  TRADE_AMOUNT_RAW,
 } from "./config.js";
 import type { JupiterExecuteResponse, JupiterOrderResponse } from "./types.js";
+
+export interface JupiterQuoteResult {
+  outAmount: string;
+  otherAmountThreshold: string;
+}
 
 const headers: Record<string, string> = {
   "Content-Type": "application/json",
@@ -23,27 +28,42 @@ const headers: Record<string, string> = {
 
 const agent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : undefined;
 
+const MAX_FETCH_RETRIES = 3;
+const RETRY_DELAY_MS = 2000;
+
 async function fetchWithProxy(
   url: string,
   init?: FetchInit
 ): Promise<FetchResponse> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, {
-      ...(init || {}),
-      headers: {
-        ...headers,
-        ...(init?.headers as Record<string, string> | undefined),
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      agent: agent as any,
-      signal: controller.signal,
-    });
-    return res;
-  } finally {
-    clearTimeout(timeout);
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_FETCH_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        ...(init || {}),
+        headers: {
+          ...headers,
+          ...(init?.headers as Record<string, string> | undefined),
+        },
+        agent: agent as any,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      return res;
+    } catch (e) {
+      clearTimeout(timeout);
+      lastErr = e;
+      const code = (e as { code?: string })?.code;
+      if (attempt < MAX_FETCH_RETRIES && (code === "ECONNRESET" || code === "ETIMEDOUT" || code === "ECONNREFUSED")) {
+        console.warn(`  网络请求失败 (${code})，${RETRY_DELAY_MS / 1000}s 后重试 (${attempt}/${MAX_FETCH_RETRIES})...`);
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      } else {
+        throw e;
+      }
+    }
   }
+  throw lastErr;
 }
 
 /**
@@ -78,6 +98,39 @@ export async function getOrder(params: {
 }
 
 /**
+ * Get a swap quote from Jupiter Swap API (no taker/balance check).
+ * 用于扫描阶段估算 Step2 输出，避免 Ultra /order 因钱包暂无中间币而报 Insufficient funds。
+ */
+export async function getQuote(params: {
+  inputMint: string;
+  outputMint: string;
+  amount: bigint;
+  slippageBps?: number;
+}): Promise<JupiterQuoteResult | { error: string }> {
+  const url = new URL(`${JUPITER_QUOTE_API_BASE}/quote`);
+  url.searchParams.set("inputMint", params.inputMint);
+  url.searchParams.set("outputMint", params.outputMint);
+  url.searchParams.set("amount", params.amount.toString());
+  url.searchParams.set("slippageBps", String(params.slippageBps ?? MAX_SLIPPAGE_BPS));
+
+  const res = await fetchWithProxy(url.toString());
+  const data = (await res.json()) as JupiterQuoteResult | { error?: string; message?: string };
+  const ok = res.status >= 200 && res.status < 300;
+
+  if (!ok) {
+    const err = "error" in data ? (data as { error: string }).error : ("message" in data ? (data as { message: string }).message : `HTTP ${res.status}`);
+    return { error: err ?? `HTTP ${res.status}` };
+  }
+  if ("error" in data && data.error) {
+    return { error: data.error };
+  }
+  if ("outAmount" in data && "otherAmountThreshold" in data) {
+    return { outAmount: data.outAmount, otherAmountThreshold: data.otherAmountThreshold };
+  }
+  return { error: "Invalid quote response" };
+}
+
+/**
  * Sign and execute an order via Jupiter Ultra execute endpoint.
  */
 export async function executeOrder(
@@ -109,5 +162,3 @@ export function getWallet(): Keypair {
   }
   return Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY_B58));
 }
-
-export { TRADE_AMOUNT_RAW };

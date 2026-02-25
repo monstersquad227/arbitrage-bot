@@ -1,30 +1,25 @@
 import type { Keypair } from "@solana/web3.js";
+import { getOrder, getQuote, executeOrder } from "./jupiter.js";
 import {
-  getOrder,
-  executeOrder,
-  getWallet,
-  TRADE_AMOUNT_RAW,
-} from "./jupiter.js";
-import {
-  USDC_MINT,
+  SOL_MINT,
   INTERMEDIATE_MINTS,
   getMinProfitRaw,
   MINT_LABEL,
-  TRADE_AMOUNT_USDC,
+  TRADE_AMOUNT_SOL,
+  TRADE_AMOUNT_RAW,
 } from "./config.js";
 import type { JupiterOrderResponse } from "./types.js";
-
-const USDC_DECIMALS = 6;
 
 export interface ArbitrageOpportunity {
   intermediateMint: string;
   step1OutAmount: string;
   step2OutAmount: string;
-  expectedUsdcBack: bigint;
+  expectedSolBack: bigint;
   profitRaw: bigint;
   profitBps: number;
   order1: JupiterOrderResponse;
-  order2: JupiterOrderResponse;
+  /** Step2 订单在 Step1 执行成功后才会请求（此时钱包已有中间币），扫描阶段仅用 quote 估算 */
+  order2?: JupiterOrderResponse;
 }
 
 function midLabel(mint: string): string {
@@ -32,7 +27,7 @@ function midLabel(mint: string): string {
 }
 
 /**
- * Check if a round-trip USDC -> intermediate -> USDC is profitable (>= 0.1% after fees).
+ * 三角套利 SOL -> 中间 -> SOL，检查是否满足最低利润 (0.1%)。
  */
 export async function findOpportunity(
   taker: string
@@ -41,10 +36,10 @@ export async function findOpportunity(
 
   for (const midMint of INTERMEDIATE_MINTS) {
     const label = midLabel(midMint);
-    console.log(`  尝试路径: USDC → ${label} → USDC`);
+    console.log(`  尝试路径: SOL → ${label} → SOL`);
 
     const order1 = await getOrder({
-      inputMint: USDC_MINT,
+      inputMint: SOL_MINT,
       outputMint: midMint,
       amount: TRADE_AMOUNT_RAW,
       taker,
@@ -56,30 +51,30 @@ export async function findOpportunity(
     }
 
     const step1OutRaw = BigInt(order1.outAmount);
-    console.log(`    Step1 报价: ${TRADE_AMOUNT_USDC} USDC → ${order1.outAmount} ${label} (raw)`);
+    console.log(`    Step1 报价: ${TRADE_AMOUNT_SOL} SOL → ${order1.outAmount} ${label} (raw)`);
 
-    const order2 = await getOrder({
+    // 使用 Quote API 估算 Step2，不校验钱包余额（扫描时钱包尚无中间币，用 /order 会报 Insufficient funds）
+    const quote2 = await getQuote({
       inputMint: midMint,
-      outputMint: USDC_MINT,
+      outputMint: SOL_MINT,
       amount: step1OutRaw,
-      taker,
     });
 
-    if ("error" in order2 || !order2.transaction || !order2.outAmount) {
-      console.log(`    Step2 报价失败或无交易: ${"error" in order2 ? order2.error : "无 transaction"}`);
+    if ("error" in quote2) {
+      console.log(`    Step2 报价失败: ${quote2.error}`);
       continue;
     }
 
-    const expectedUsdcBack = BigInt(order2.otherAmountThreshold);
-    const profitRaw = expectedUsdcBack > TRADE_AMOUNT_RAW
-      ? expectedUsdcBack - TRADE_AMOUNT_RAW
+    const expectedSolBack = BigInt(quote2.otherAmountThreshold);
+    const profitRaw = expectedSolBack > TRADE_AMOUNT_RAW
+      ? expectedSolBack - TRADE_AMOUNT_RAW
       : BigInt(0);
     const profitBps = Number(
       (profitRaw * BigInt(10_000)) / TRADE_AMOUNT_RAW
     );
 
-    console.log(`    Step2 报价: ${order1.outAmount} ${label} → ${formatUsdc(expectedUsdcBack)} USDC (最少)`);
-    console.log(`     round-trip 结果: 投入 ${TRADE_AMOUNT_USDC} USDC → 收回 ${formatUsdc(expectedUsdcBack)} USDC | 利润 ${formatUsdc(profitRaw)} USDC (${profitBps} bps)`);
+    console.log(`    Step2 报价: ${order1.outAmount} ${label} → ${formatSol(expectedSolBack)} SOL (最少)`);
+    console.log(`     round-trip 结果: 投入 ${TRADE_AMOUNT_SOL} SOL → 收回 ${formatSol(expectedSolBack)} SOL | 利润 ${formatSol(profitRaw)} SOL (${profitBps} bps)`);
 
     if (profitRaw < minProfitRaw) {
       console.log(`    未达最低利润阈值 (0.1%)，跳过`);
@@ -90,12 +85,12 @@ export async function findOpportunity(
     return {
       intermediateMint: midMint,
       step1OutAmount: order1.outAmount,
-      step2OutAmount: order2.outAmount,
-      expectedUsdcBack,
+      step2OutAmount: quote2.outAmount,
+      expectedSolBack,
       profitRaw,
       profitBps,
       order1: order1 as JupiterOrderResponse,
-      order2: order2 as JupiterOrderResponse,
+      order2: undefined,
     };
   }
 
@@ -104,20 +99,22 @@ export async function findOpportunity(
 
 /**
  * Execute a two-step arbitrage: sign and submit both swaps in sequence.
+ * Step2 订单在 Step1 成功后再请求（此时钱包已持有中间币），避免 Jupiter 报 Insufficient funds。
  */
 export async function runArbitrage(
   wallet: Keypair,
   opp: ArbitrageOpportunity
 ): Promise<{ step1: boolean; step2: boolean; signature1?: string; signature2?: string }> {
-  if (!opp.order1.transaction || !opp.order2.transaction) {
+  if (!opp.order1.transaction) {
     return { step1: false, step2: false };
   }
 
+  const taker = wallet.publicKey.toBase58();
   const mid = midLabel(opp.intermediateMint);
   console.log("");
   console.log("========== 执行套利 ==========");
-  console.log(`  路径: USDC → ${mid} → USDC | 预期利润 ${formatUsdc(opp.profitRaw)} USDC (${opp.profitBps} bps)`);
-  console.log("  Step1: 提交 USDC → " + mid + " ...");
+  console.log(`  路径: SOL → ${mid} → SOL | 预期利润 ${formatSol(opp.profitRaw)} SOL (${opp.profitBps} bps)`);
+  console.log("  Step1: 提交 SOL → " + mid + " ...");
   const exec1 = await executeOrder(
     opp.order1.requestId,
     opp.order1.transaction,
@@ -130,10 +127,30 @@ export async function runArbitrage(
   }
   console.log("  Step1 成功:", exec1.signature);
 
-  console.log("  Step2: 提交 " + mid + " → USDC ...");
+  let order2 = opp.order2;
+  if (!order2?.transaction) {
+    console.log("  Step2: 请求订单（钱包已持有 " + mid + "）...");
+    const step2Order = await getOrder({
+      inputMint: opp.intermediateMint,
+      outputMint: SOL_MINT,
+      amount: BigInt(opp.step1OutAmount),
+      taker,
+    });
+    if ("error" in step2Order || !step2Order.transaction) {
+      console.error("  Step2 订单请求失败:", "error" in step2Order ? step2Order.error : "无 transaction");
+      return { step1: true, step2: false, signature1: exec1.signature };
+    }
+    order2 = step2Order;
+  }
+
+  if (!order2.transaction) {
+    console.error("  Step2 无有效 transaction");
+    return { step1: true, step2: false, signature1: exec1.signature };
+  }
+  console.log("  Step2: 提交 " + mid + " → SOL ...");
   const exec2 = await executeOrder(
-    opp.order2.requestId,
-    opp.order2.transaction,
+    order2.requestId,
+    order2.transaction,
     wallet
   );
 
@@ -152,16 +169,16 @@ export async function runArbitrage(
   };
 }
 
-export function formatUsdc(raw: bigint): string {
-  return (Number(raw) / 10 ** USDC_DECIMALS).toFixed(USDC_DECIMALS);
+export function formatSol(raw: bigint): string {
+  return (Number(raw) / 1e9).toFixed(9);
 }
 
 export function logOpportunity(opp: ArbitrageOpportunity): void {
   const mid = midLabel(opp.intermediateMint);
   console.log("");
   console.log(
-    `[套利机会] USDC → ${mid} → USDC | ` +
-      `预期收回 ${formatUsdc(opp.expectedUsdcBack)} USDC | ` +
-      `利润 ${formatUsdc(opp.profitRaw)} USDC (${opp.profitBps} bps)`
+    `[套利机会] SOL → ${mid} → SOL | ` +
+      `预期收回 ${formatSol(opp.expectedSolBack)} SOL | ` +
+      `利润 ${formatSol(opp.profitRaw)} SOL (${opp.profitBps} bps)`
   );
 }
