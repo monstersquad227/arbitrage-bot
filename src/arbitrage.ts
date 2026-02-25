@@ -165,7 +165,8 @@ export async function runArbitrage(
     const step2Order = await getOrder({
       inputMint: opp.corner1Mint,
       outputMint: opp.corner2Mint,
-      amount: BigInt(opp.step1OutAmount),
+      // 使用 Step1 订单中保证的最小输出量，避免由于实际到账略小于预估 outAmount 导致 Insufficient funds
+      amount: BigInt(opp.order1.otherAmountThreshold ?? opp.step1OutAmount),
       taker,
     });
     if ("error" in step2Order || !step2Order.transaction) {
@@ -193,7 +194,9 @@ export async function runArbitrage(
   console.log("  Step2 成功:", exec2.signature);
 
   // Step3: corner2 → USDC（需用 Step2 实际输出量请求，此处用扫描时的 step2OutAmount 近似）
-  const step2OutForOrder = order2.outAmount ?? opp.step2OutAmount;
+  // 优先使用 Step2 订单的最小保证输出量，其次是预估 outAmount，最后退回扫描阶段的估算值
+  const step2OutForOrder =
+    order2.otherAmountThreshold ?? order2.outAmount ?? opp.step2OutAmount;
   console.log("  Step3: 请求订单（" + l2 + " → USDC）...");
   const step3Order = await getOrder({
     inputMint: opp.corner2Mint,
