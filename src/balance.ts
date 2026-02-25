@@ -1,5 +1,5 @@
 import { Connection, PublicKey } from "@solana/web3.js";
-import { MIN_SOL_LAMPORTS, RPC_URL, TRADE_AMOUNT_RAW } from "./config.js";
+import { MIN_SOL_LAMPORTS, RPC_URL } from "./config.js";
 import { proxyFetch } from "./proxyFetch.js";
 
 export interface WalletBalance {
@@ -8,8 +8,8 @@ export interface WalletBalance {
   message?: string;
 }
 
-/** 套利路径为 SOL -> 中间 -> SOL，只需检查 SOL 余额（套利用量 + gas 预留） */
-const SOL_NEEDED_RAW = Number(TRADE_AMOUNT_RAW) + MIN_SOL_LAMPORTS;
+/** 仅需检查用于 gas 的 SOL 余额（USDC 为套利本金） */
+const SOL_NEEDED_RAW = MIN_SOL_LAMPORTS;
 
 /**
  * 预检查钱包余额：SOL 是否满足本轮套利（交易用量 + gas）。

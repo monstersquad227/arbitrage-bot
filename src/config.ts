@@ -1,20 +1,29 @@
 import "dotenv/config";
 
-const LAMPORTS_PER_SOL = 1e9;
+/** Minimum profit (after fees) in bps, e.g. 10 = 0.1% */
+export const MIN_PROFIT_BPS = 10; // 0.1%
 
-/** Minimum profit (after fees) as decimal, e.g. 0.001 = 0.1% */
-export const MIN_PROFIT_BPS = 10; // 0.1% = 10 bps
+/** USDC decimals on Solana */
+const USDC_DECIMALS = 6;
 
-/** 每笔套利金额（SOL）。账户约 0.07546 SOL 时建议 ≤ 0.07（预留 gas） */
-export const TRADE_AMOUNT_SOL = Number(process.env.TRADE_AMOUNT_SOL) || 0.07;
+/**
+ * 每笔套利金额（USDC）。
+ * 按 PART4 要求，默认 1.99 USDC，可通过 TRADE_AMOUNT_USDC 覆盖。
+ */
+export const TRADE_AMOUNT_USDC =
+  Number(process.env.TRADE_AMOUNT_USDC) || 1.99;
 
-/** 每笔套利金额（lamports） */
+/** 每笔套利金额，按 USDC 最小单位（10^6）表示 */
 export const TRADE_AMOUNT_RAW = BigInt(
-  Math.floor(TRADE_AMOUNT_SOL * LAMPORTS_PER_SOL)
+  Math.floor(TRADE_AMOUNT_USDC * 10 ** USDC_DECIMALS)
 );
 
-/** Max slippage in basis points (50 = 0.5%). 优化：略放宽以提升成交率，兼顾利润率 */
-export const MAX_SLIPPAGE_BPS = Number(process.env.MAX_SLIPPAGE_BPS) || 50;
+/**
+ * Max slippage in basis points.
+ * 三角路径共有 3 笔 swap，为了在最坏滑点下仍保留 ≥0.1% 利润，
+ * 近似要求 3 * MAX_SLIPPAGE_BPS < MIN_PROFIT_BPS (=10 bps)，因此默认设为 3 bps。
+ */
+export const MAX_SLIPPAGE_BPS = Number(process.env.MAX_SLIPPAGE_BPS) || 3;
 
 export const JUPITER_API_BASE = "https://api.jup.ag/ultra/v1";
 /** Swap Quote API（仅报价，不校验钱包余额，用于扫描阶段 Step2 估算） */
@@ -43,33 +52,32 @@ export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 export const SOL_MINT = "So11111111111111111111111111111111111111112";
 /** USDT mint */
 export const USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
-/** BONK mint */
-export const BONK_MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 /** USD1 (World Liberty Financial) mint */
 export const USD1_MINT = "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB";
-/** Monad 相关代币（Solana 上 MONPRINT） */
-export const MONAD_MINT = "monpETkyy6Djd2GYkAPrfVFwYGgY8q9iE88ihLcMUmB";
+/** LIT mint */
+export const LIT_MINT = "EicWvteVi2fWepEzS3FYWsnuPoP6caZfjnKqNvydLjCH";
 
-/** 三角套利 SOL -> 角1 -> 角2 -> SOL 的角代币（不含 SOL/WSOL） */
+/**
+ * 三角套利 USDC -> corner1 -> corner2 -> USDC 的角代币集合（不含 USDC 本身）。
+ * 按 PART4 要求重置为: USD1, WSOL, USDT, LIT。
+ */
 export const CORNER_MINTS = [
-  USDC_MINT,
-  BONK_MINT,
-  USDT_MINT,
   USD1_MINT,
-  MONAD_MINT,
+  SOL_MINT,
+  USDT_MINT,
+  LIT_MINT,
 ];
 
 /** Mint -> 显示名称（用于日志） */
 export const MINT_LABEL: Record<string, string> = {
   [SOL_MINT]: "SOL",
   [USDC_MINT]: "USDC",
-  [BONK_MINT]: "BONK",
   [USDT_MINT]: "USDT",
   [USD1_MINT]: "USD1",
-  [MONAD_MINT]: "Monad",
+  [LIT_MINT]: "LIT",
 };
 
 export function getMinProfitRaw(): bigint {
-  // 0.1% of trade amount, in lamports
+  // 0.1% of trade amount, in USDC smallest units
   return (TRADE_AMOUNT_RAW * BigInt(MIN_PROFIT_BPS)) / BigInt(10_000);
 }

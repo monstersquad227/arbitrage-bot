@@ -1,11 +1,10 @@
 import type { Keypair } from "@solana/web3.js";
 import { getOrder, getQuote, executeOrder } from "./jupiter.js";
 import {
-  SOL_MINT,
+  USDC_MINT,
   CORNER_MINTS,
   getMinProfitRaw,
   MINT_LABEL,
-  TRADE_AMOUNT_SOL,
   TRADE_AMOUNT_RAW,
 } from "./config.js";
 import type { JupiterOrderResponse } from "./types.js";
@@ -29,7 +28,7 @@ function mintLabel(mint: string): string {
 }
 
 /**
- * 三角套利 SOL -> 角1 -> 角2 -> SOL，检查是否满足最低利润 (0.1%)。
+ * 三角套利 USDC -> corner1 -> corner2 -> USDC，检查是否满足最低利润 (0.1%)。
  */
 export async function findOpportunity(
   taker: string
@@ -41,10 +40,10 @@ export async function findOpportunity(
       if (c1 === c2) continue;
       const l1 = mintLabel(c1);
       const l2 = mintLabel(c2);
-      console.log(`  尝试路径: SOL → ${l1} → ${l2} → SOL`);
+      console.log(`  尝试路径: USDC → ${l1} → ${l2} → USDC`);
 
       const order1 = await getOrder({
-        inputMint: SOL_MINT,
+        inputMint: USDC_MINT,
         outputMint: c1,
         amount: TRADE_AMOUNT_RAW,
         taker,
@@ -56,7 +55,9 @@ export async function findOpportunity(
       }
 
       const step1OutRaw = BigInt(order1.outAmount);
-      console.log(`    Step1 报价: ${TRADE_AMOUNT_SOL} SOL → ${order1.outAmount} ${l1} (raw)`);
+      console.log(
+        `    Step1 报价: 1.99 USDC → ${order1.outAmount} ${l1} (raw)`
+      );
 
       const quote2 = await getQuote({
         inputMint: c1,
@@ -71,7 +72,7 @@ export async function findOpportunity(
 
       const quote3 = await getQuote({
         inputMint: c2,
-        outputMint: SOL_MINT,
+        outputMint: USDC_MINT,
         amount: BigInt(quote2.outAmount),
       });
       if ("error" in quote3) {
@@ -79,16 +80,25 @@ export async function findOpportunity(
         continue;
       }
 
-      const expectedSolBack = BigInt(quote3.otherAmountThreshold);
-      const profitRaw = expectedSolBack > TRADE_AMOUNT_RAW
-        ? expectedSolBack - TRADE_AMOUNT_RAW
-        : BigInt(0);
+      const expectedUsdcBack = BigInt(quote3.otherAmountThreshold);
+      const profitRaw =
+        expectedUsdcBack > TRADE_AMOUNT_RAW
+          ? expectedUsdcBack - TRADE_AMOUNT_RAW
+          : BigInt(0);
       const profitBps = Number(
         (profitRaw * BigInt(10_000)) / TRADE_AMOUNT_RAW
       );
 
-      console.log(`    Step3 报价: ${quote2.outAmount} ${l2} → ${formatSol(expectedSolBack)} SOL (最少)`);
-      console.log(`     round-trip: 投入 ${TRADE_AMOUNT_SOL} SOL → 收回 ${formatSol(expectedSolBack)} SOL | 利润 ${formatSol(profitRaw)} SOL (${profitBps} bps)`);
+      console.log(
+        `    Step3 报价: ${quote2.outAmount} ${l2} → ${formatUsdc(
+          expectedUsdcBack
+        )} USDC (最少)`
+      );
+      console.log(
+        `     round-trip: 投入 1.99 USDC → 收回 ${formatUsdc(
+          expectedUsdcBack
+        )} USDC | 利润 ${formatUsdc(profitRaw)} USDC (${profitBps} bps)`
+      );
 
       if (profitRaw < minProfitRaw) {
         console.log(`    未达最低利润阈值 (0.1%)，跳过`);
@@ -101,7 +111,7 @@ export async function findOpportunity(
         corner2Mint: c2,
         step1OutAmount: order1.outAmount,
         step2OutAmount: quote2.outAmount,
-        expectedSolBack,
+        expectedSolBack: expectedUsdcBack,
         profitRaw,
         profitBps,
         order1: order1 as JupiterOrderResponse,
@@ -115,7 +125,7 @@ export async function findOpportunity(
 }
 
 /**
- * Execute triangular arbitrage: SOL → corner1 → corner2 → SOL (3 swaps).
+ * Execute triangular arbitrage: USDC → corner1 → corner2 → USDC (3 swaps).
  * Step2/Step3 订单在前一步成功后再请求，避免 Jupiter 报 Insufficient funds。
  */
 export async function runArbitrage(
@@ -131,8 +141,12 @@ export async function runArbitrage(
   const l2 = mintLabel(opp.corner2Mint);
   console.log("");
   console.log("========== 执行三角套利 ==========");
-  console.log(`  路径: SOL → ${l1} → ${l2} → SOL | 预期利润 ${formatSol(opp.profitRaw)} SOL (${opp.profitBps} bps)`);
-  console.log("  Step1: 提交 SOL → " + l1 + " ...");
+  console.log(
+    `  路径: USDC → ${l1} → ${l2} → USDC | 预期利润 ${formatUsdc(
+      opp.profitRaw
+    )} USDC (${opp.profitBps} bps)`
+  );
+  console.log("  Step1: 提交 USDC → " + l1 + " ...");
   const exec1 = await executeOrder(
     opp.order1.requestId,
     opp.order1.transaction,
@@ -178,12 +192,12 @@ export async function runArbitrage(
   }
   console.log("  Step2 成功:", exec2.signature);
 
-  // Step3: corner2 → SOL（需用 Step2 实际输出量请求，此处用扫描时的 step2OutAmount 近似）
+  // Step3: corner2 → USDC（需用 Step2 实际输出量请求，此处用扫描时的 step2OutAmount 近似）
   const step2OutForOrder = order2.outAmount ?? opp.step2OutAmount;
-  console.log("  Step3: 请求订单（" + l2 + " → SOL）...");
+  console.log("  Step3: 请求订单（" + l2 + " → USDC）...");
   const step3Order = await getOrder({
     inputMint: opp.corner2Mint,
-    outputMint: SOL_MINT,
+    outputMint: USDC_MINT,
     amount: BigInt(step2OutForOrder),
     taker,
   });
@@ -191,7 +205,7 @@ export async function runArbitrage(
     console.error("  Step3 订单请求失败:", "error" in step3Order ? step3Order.error : "无 transaction");
     return { step1: true, step2: true, step3: false, signature1: exec1.signature, signature2: exec2.signature };
   }
-  console.log("  Step3: 提交 " + l2 + " → SOL ...");
+  console.log("  Step3: 提交 " + l2 + " → USDC ...");
   const exec3 = await executeOrder(
     step3Order.requestId,
     step3Order.transaction,
@@ -215,8 +229,8 @@ export async function runArbitrage(
   };
 }
 
-export function formatSol(raw: bigint): string {
-  return (Number(raw) / 1e9).toFixed(9);
+export function formatUsdc(raw: bigint): string {
+  return (Number(raw) / 1e6).toFixed(6);
 }
 
 export function logOpportunity(opp: ArbitrageOpportunity): void {
@@ -224,8 +238,8 @@ export function logOpportunity(opp: ArbitrageOpportunity): void {
   const l2 = mintLabel(opp.corner2Mint);
   console.log("");
   console.log(
-    `[套利机会] SOL → ${l1} → ${l2} → SOL | ` +
-      `预期收回 ${formatSol(opp.expectedSolBack)} SOL | ` +
-      `利润 ${formatSol(opp.profitRaw)} SOL (${opp.profitBps} bps)`
+    `[套利机会] USDC → ${l1} → ${l2} → USDC | ` +
+      `预期收回 ${formatUsdc(opp.expectedSolBack)} USDC | ` +
+      `利润 ${formatUsdc(opp.profitRaw)} USDC (${opp.profitBps} bps)`
   );
 }

@@ -34,3 +34,14 @@
 + USDC
 #### 套利策略
 + 现有账户余额为0.07546sol，帮我优化利润率和滑点
+
+## PART4
+### 套利路径
++ 更改套利路径为 USDC --> corne1 --> corner2 --> USDC
+### 重置池子为下列
++ USD1:USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB
++ WSOL:So11111111111111111111111111111111111111112
++ USDT:Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB
++ LIT: EicWvteVi2fWepEzS3FYWsnuPoP6caZfjnKqNvydLjCH
+### 策略
++ 每次 1.99 买入，利润率为0.1% 滑点帮我计算下，确保我能够盈利（哪怕一点点）

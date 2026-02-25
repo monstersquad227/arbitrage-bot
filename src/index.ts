@@ -1,5 +1,10 @@
 import { getWallet } from "./jupiter.js";
-import { POLL_INTERVAL_MS, DRY_RUN, TRADE_AMOUNT_SOL, TRADE_AMOUNT_RAW } from "./config.js";
+import {
+  POLL_INTERVAL_MS,
+  DRY_RUN,
+  TRADE_AMOUNT_USDC,
+  TRADE_AMOUNT_RAW,
+} from "./config.js";
 import {
   findOpportunity,
   runArbitrage,
@@ -13,7 +18,12 @@ async function main(): Promise<void> {
   console.log("Arbitrage bot started. Wallet:", taker);
   console.log("Poll interval:", POLL_INTERVAL_MS, "ms");
   console.log("DRY_RUN (不真实交易):", DRY_RUN);
-  console.log("每笔套利金额:", TRADE_AMOUNT_SOL, "SOL (raw:", TRADE_AMOUNT_RAW.toString() + ")");
+  console.log(
+    "每笔套利金额:",
+    TRADE_AMOUNT_USDC,
+    "USDC (raw:",
+    TRADE_AMOUNT_RAW.toString() + ")"
+  );
   console.log("---");
 
   for (;;) {
