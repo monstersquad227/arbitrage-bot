@@ -1,13 +1,26 @@
 import type { Keypair } from "@solana/web3.js";
-import { getOrder, getQuote, getQuoteSwapV1, getSwapTransactionSwapV1, executeSwapV1 } from "./jupiter.js";
+import { Connection } from "@solana/web3.js";
+import {
+  getOrder,
+  getQuote,
+  getQuoteSwapV1,
+  getSwapTransactionSwapV1,
+  getSwapInstructionsSwapV1,
+  buildMergedSwapTransaction,
+  executeSwapV1,
+  executeOrder,
+} from "./jupiter.js";
 import {
   USDC_MINT,
   CORNER_MINTS,
   getMinProfitRaw,
   MINT_LABEL,
   TRADE_AMOUNT_RAW,
+  RPC_URL,
+  STEP3_AMOUNT_BUFFER_BPS,
   STEP3_SLIPPAGE_BPS,
 } from "./config.js";
+import { proxyFetch } from "./proxyFetch.js";
 import type { JupiterOrderResponse } from "./types.js";
 
 export interface ArbitrageOpportunity {
@@ -162,9 +175,87 @@ export async function findOpportunity(
   };
 }
 
+const SAME_MINT_ERROR = "Input and output mints are not allowed to be equal";
+
 /**
- * Execute triangular arbitrage as a single atomic TX: USDC → A → B → USDC.
- * Uses Jupiter Swap API v1 multi-hop: one quote for full path, one swap TX.
+ * Execute triangular arbitrage as a single atomic TX by merging 3 Swap API v1 legs.
+ * Gets quote + swap-instructions for USDC→A, A→B, B→USDC and builds one transaction.
+ */
+async function runArbitrageSingleTxFromThreeQuotes(
+  wallet: Keypair,
+  opp: ArbitrageOpportunity
+): Promise<{ success: boolean; signature?: string; errorMessage?: string }> {
+  const taker = wallet.publicKey.toBase58();
+
+  console.log("  三角路径: 3 段报价 + 合并为单笔原子交易...");
+
+  const quote1 = await getQuoteSwapV1({
+    inputMint: USDC_MINT,
+    outputMint: opp.corner1Mint,
+    amount: TRADE_AMOUNT_RAW.toString(),
+    taker,
+    slippageBps: STEP3_SLIPPAGE_BPS,
+  });
+  if ("error" in quote1) {
+    return { success: false, errorMessage: `Leg1 报价: ${(quote1 as { error: string }).error}` };
+  }
+  const amount2 = String((quote1 as { otherAmountThreshold?: string }).otherAmountThreshold ?? (quote1 as { outAmount?: string }).outAmount ?? opp.step1OutAmount);
+
+  const quote2 = await getQuoteSwapV1({
+    inputMint: opp.corner1Mint,
+    outputMint: opp.corner2Mint,
+    amount: amount2,
+    taker,
+    slippageBps: STEP3_SLIPPAGE_BPS,
+  });
+  if ("error" in quote2) {
+    return { success: false, errorMessage: `Leg2 报价: ${(quote2 as { error: string }).error}` };
+  }
+  const amount3Raw = (quote2 as { otherAmountThreshold?: string }).otherAmountThreshold ?? (quote2 as { outAmount?: string }).outAmount ?? opp.step2OutAmount;
+  const amount3 = String((BigInt(amount3Raw) * BigInt(STEP3_AMOUNT_BUFFER_BPS)) / BigInt(10_000));
+
+  const quote3 = await getQuoteSwapV1({
+    inputMint: opp.corner2Mint,
+    outputMint: USDC_MINT,
+    amount: amount3,
+    taker,
+    slippageBps: STEP3_SLIPPAGE_BPS,
+  });
+  if ("error" in quote3) {
+    return { success: false, errorMessage: `Leg3 报价: ${(quote3 as { error: string }).error}` };
+  }
+
+  const inst1 = await getSwapInstructionsSwapV1({ quoteResponse: quote1, userPublicKey: taker });
+  if ("error" in inst1) return { success: false, errorMessage: `Leg1 指令: ${inst1.error}` };
+  const inst2 = await getSwapInstructionsSwapV1({ quoteResponse: quote2, userPublicKey: taker });
+  if ("error" in inst2) return { success: false, errorMessage: `Leg2 指令: ${inst2.error}` };
+  const inst3 = await getSwapInstructionsSwapV1({ quoteResponse: quote3, userPublicKey: taker });
+  if ("error" in inst3) return { success: false, errorMessage: `Leg3 指令: ${inst3.error}` };
+
+  const connection = new Connection(RPC_URL, { fetch: proxyFetch as any });
+  const merged = await buildMergedSwapTransaction({
+    instructionSets: [inst1, inst2, inst3],
+    payer: wallet.publicKey,
+    connection,
+  });
+
+  if (typeof merged !== "string") {
+    return { success: false, errorMessage: merged.error };
+  }
+
+  console.log("  签名并提交 (单笔原子交易)...");
+  const exec = await executeSwapV1(merged, wallet);
+  if ("error" in exec) {
+    return { success: false, errorMessage: exec.error };
+  }
+  return { success: true, signature: exec.signature };
+}
+
+/**
+ * Execute triangular arbitrage: USDC → A → B → USDC.
+ * Prefers single atomic TX via Jupiter Swap API v1 (same-mint quote); if API
+ * rejects ("Input and output mints are not allowed to be equal"), falls back
+ * to 3 separate TXs via Ultra API. Returns { success, signature } in both cases.
  */
 export async function runArbitrage(
   wallet: Keypair,
@@ -175,14 +266,14 @@ export async function runArbitrage(
   const l2 = mintLabel(opp.corner2Mint);
 
   console.log("");
-  console.log("========== 执行三角套利（单笔原子交易） ==========");
+  console.log("========== 执行三角套利 ==========");
   console.log(
     `  路径: USDC → ${l1} → ${l2} → USDC | 预期利润 ${formatUsdc(
       opp.profitRaw
     )} USDC (${opp.profitBps} bps)`
   );
 
-  console.log("  请求完整路径报价 (USDC → USDC, restrictIntermediateTokens=false)...");
+  console.log("  请求完整路径报价 (Swap API v1)...");
   const quote = await getQuoteSwapV1({
     inputMint: USDC_MINT,
     outputMint: USDC_MINT,
@@ -194,6 +285,10 @@ export async function runArbitrage(
 
   if ("error" in quote) {
     const err = (quote as { error: string }).error;
+    if (err.includes(SAME_MINT_ERROR)) {
+      console.log("  三角路径 (USDC→USDC) 不支持单笔报价，改用 3 段报价合并为单笔交易");
+      return runArbitrageSingleTxFromThreeQuotes(wallet, opp);
+    }
     console.error("  报价失败:", err);
     return { success: false, errorMessage: err };
   }
@@ -209,7 +304,7 @@ export async function runArbitrage(
     return { success: false, errorMessage: swapResult.error };
   }
 
-  console.log("  签名并提交...");
+  console.log("  签名并提交 (单笔原子交易)...");
   const exec = await executeSwapV1(swapResult.swapTransaction, wallet);
 
   if ("error" in exec) {

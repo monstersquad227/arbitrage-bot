@@ -1,4 +1,12 @@
-import { Keypair, VersionedTransaction } from "@solana/web3.js";
+import {
+  Keypair,
+  VersionedTransaction,
+  Connection,
+  PublicKey,
+  TransactionInstruction,
+  TransactionMessage,
+  AddressLookupTableAccount,
+} from "@solana/web3.js";
 import bs58 from "bs58";
 import fetch, {
   type RequestInit as FetchInit,
@@ -16,7 +24,6 @@ import {
   RPC_URL,
 } from "./config.js";
 import type { JupiterExecuteResponse, JupiterOrderResponse } from "./types.js";
-import { Connection } from "@solana/web3.js";
 import { proxyFetch } from "./proxyFetch.js";
 
 export interface JupiterQuoteResult {
@@ -220,6 +227,122 @@ export async function getSwapTransactionSwapV1(params: {
     return { error: "No swapTransaction in response" };
   }
   return { swapTransaction: data.swapTransaction };
+}
+
+/** Single instruction from Jupiter swap-instructions API */
+export interface JupiterSwapInstructionRaw {
+  programId: string;
+  accounts: { pubkey: string; isSigner: boolean; isWritable: boolean }[];
+  data: string;
+}
+
+/** Response from POST /swap/v1/swap-instructions */
+export interface JupiterSwapInstructionsResponse {
+  computeBudgetInstructions: JupiterSwapInstructionRaw[];
+  setupInstructions: JupiterSwapInstructionRaw[];
+  swapInstruction: JupiterSwapInstructionRaw;
+  cleanupInstruction: JupiterSwapInstructionRaw | null;
+  otherInstructions: JupiterSwapInstructionRaw[];
+  addressLookupTableAddresses: string[];
+}
+
+function rawToInstruction(raw: JupiterSwapInstructionRaw): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: new PublicKey(raw.programId),
+    keys: raw.accounts.map((a) => ({
+      pubkey: new PublicKey(a.pubkey),
+      isSigner: a.isSigner,
+      isWritable: a.isWritable,
+    })),
+    data: Buffer.from(raw.data, "base64"),
+  });
+}
+
+/**
+ * Jupiter Swap API v1: get swap instructions from a quote (for composing multi-hop TX).
+ */
+export async function getSwapInstructionsSwapV1(params: {
+  quoteResponse: JupiterQuoteSwapV1Response;
+  userPublicKey: string;
+}): Promise<JupiterSwapInstructionsResponse | { error: string }> {
+  const res = await fetchWithProxy(`${JUPITER_QUOTE_API_BASE}/swap-instructions`, {
+    method: "POST",
+    body: JSON.stringify({
+      quoteResponse: params.quoteResponse,
+      userPublicKey: params.userPublicKey,
+    }),
+  });
+  const data = (await res.json()) as JupiterSwapInstructionsResponse | { error?: string; message?: string };
+  const ok = res.status >= 200 && res.status < 300;
+  if (!ok) {
+    const errMsg = (data as { error?: string; message?: string }).error ?? (data as { message?: string }).message ?? `HTTP ${res.status}`;
+    return { error: String(errMsg) };
+  }
+  if ("error" in data && (data as { error?: string }).error) {
+    return { error: (data as { error: string }).error };
+  }
+  const out = data as JupiterSwapInstructionsResponse;
+  if (!out.swapInstruction || !Array.isArray(out.addressLookupTableAddresses)) {
+    return { error: "Invalid swap-instructions response" };
+  }
+  return out;
+}
+
+/**
+ * Build one VersionedTransaction (base64) from 3 swap-instruction sets (triangular path).
+ * Order: computeBudget (first only), setup1, swap1, setup2, swap2, setup3, swap3, cleanups.
+ */
+export async function buildMergedSwapTransaction(params: {
+  instructionSets: JupiterSwapInstructionsResponse[];
+  payer: PublicKey;
+  connection: Connection;
+}): Promise<string | { error: string }> {
+  try {
+    const { instructionSets, payer, connection } = params;
+    const allInstructions: TransactionInstruction[] = [];
+    const lookupAddresses = new Set<string>();
+
+    for (const addr of instructionSets.flatMap((s) => s.addressLookupTableAddresses)) {
+      lookupAddresses.add(addr);
+    }
+
+    const hasComputeBudget = instructionSets[0]?.computeBudgetInstructions?.length;
+    if (hasComputeBudget) {
+      for (const i of instructionSets[0].computeBudgetInstructions) {
+        allInstructions.push(rawToInstruction(i));
+      }
+    }
+
+    for (const set of instructionSets) {
+      for (const i of set.setupInstructions ?? []) {
+        allInstructions.push(rawToInstruction(i));
+      }
+      allInstructions.push(rawToInstruction(set.swapInstruction));
+      if (set.cleanupInstruction) {
+        allInstructions.push(rawToInstruction(set.cleanupInstruction));
+      }
+    }
+
+    const blockhash = await connection.getLatestBlockhash("finalized");
+    const lookupAccounts: AddressLookupTableAccount[] = [];
+    for (const addr of lookupAddresses) {
+      const resp = await connection.getAddressLookupTable(new PublicKey(addr));
+      const table = "value" in resp ? resp.value : (resp as AddressLookupTableAccount | null);
+      if (table) lookupAccounts.push(table);
+    }
+
+    const message = new TransactionMessage({
+      payerKey: payer,
+      recentBlockhash: blockhash.blockhash,
+      instructions: allInstructions,
+    }).compileToV0Message(lookupAccounts.length ? lookupAccounts : undefined);
+
+    const tx = new VersionedTransaction(message);
+    return Buffer.from(tx.serialize()).toString("base64");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { error: msg };
+  }
 }
 
 /**
