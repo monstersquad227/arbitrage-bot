@@ -77,8 +77,19 @@ async function main(): Promise<void> {
       }
 
       console.log("[扫描] 正在检测套利机会...");
-      const { opportunity: opp, scannedPaths } = await findOpportunity(taker);
-      const scanEndTime = new Date();
+      let scanEndTime: Date;
+      let scannedPaths = 0;
+      let opp: Awaited<ReturnType<typeof findOpportunity>>["opportunity"] = null;
+      try {
+        const result = await findOpportunity(taker);
+        scanEndTime = new Date();
+        scannedPaths = result.scannedPaths;
+        opp = result.opportunity;
+      } catch (err) {
+        console.error("Tick error:", err);
+        scanEndTime = new Date();
+        // 网络错误等异常时仍记录结束时间和已扫描路径数（findOpportunity 内部已尽量不抛错，此处为兜底）
+      }
 
       if (isDbEnabled() && scanId !== null) {
         try {
