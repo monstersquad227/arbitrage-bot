@@ -13,8 +13,11 @@ import {
   PRIVATE_KEY_B58,
   PROXY_URL,
   REQUEST_TIMEOUT_MS,
+  RPC_URL,
 } from "./config.js";
 import type { JupiterExecuteResponse, JupiterOrderResponse } from "./types.js";
+import { Connection } from "@solana/web3.js";
+import { proxyFetch } from "./proxyFetch.js";
 
 export interface JupiterQuoteResult {
   outAmount: string;
@@ -151,6 +154,95 @@ export async function executeOrder(
     }),
   });
   return (await res.json()) as JupiterExecuteResponse;
+}
+
+/** Swap API v1: quote response (pass-through to /swap). */
+export type JupiterQuoteSwapV1Response = Record<string, unknown>;
+
+/**
+ * Jupiter Swap API v1: get quote for full path (e.g. USDC -> A -> B -> USDC).
+ * Uses restrictIntermediateTokens=false so router can use any intermediates.
+ */
+export async function getQuoteSwapV1(params: {
+  inputMint: string;
+  outputMint: string;
+  amount: string;
+  taker: string;
+  slippageBps?: number;
+  restrictIntermediateTokens?: boolean;
+}): Promise<JupiterQuoteSwapV1Response | { error: string }> {
+  const url = new URL(`${JUPITER_QUOTE_API_BASE}/quote`);
+  url.searchParams.set("inputMint", params.inputMint);
+  url.searchParams.set("outputMint", params.outputMint);
+  url.searchParams.set("amount", params.amount);
+  url.searchParams.set("slippageBps", String(params.slippageBps ?? MAX_SLIPPAGE_BPS));
+  url.searchParams.set("restrictIntermediateTokens", String(params.restrictIntermediateTokens ?? false));
+
+  const res = await fetchWithProxy(url.toString());
+  const data = (await res.json()) as JupiterQuoteSwapV1Response | { error?: string; message?: string };
+  const ok = res.status >= 200 && res.status < 300;
+
+  if (!ok) {
+    const err = "error" in data ? (data as { error: string }).error : ("message" in data ? (data as { message: string }).message : `HTTP ${res.status}`);
+    return { error: err ?? `HTTP ${res.status}` };
+  }
+  if ("error" in data && data.error) {
+    return { error: data.error };
+  }
+  return data as JupiterQuoteSwapV1Response;
+}
+
+/**
+ * Jupiter Swap API v1: build unsigned swap transaction from quote.
+ */
+export async function getSwapTransactionSwapV1(params: {
+  quoteResponse: JupiterQuoteSwapV1Response;
+  userPublicKey: string;
+}): Promise<{ swapTransaction: string } | { error: string }> {
+  const res = await fetchWithProxy(`${JUPITER_QUOTE_API_BASE}/swap`, {
+    method: "POST",
+    body: JSON.stringify({
+      quoteResponse: params.quoteResponse,
+      userPublicKey: params.userPublicKey,
+    }),
+  });
+  const data = (await res.json()) as { swapTransaction?: string; error?: string; message?: string };
+  const ok = res.status >= 200 && res.status < 300;
+
+  if (!ok) {
+    const err = data.error ?? data.message ?? `HTTP ${res.status}`;
+    return { error: err };
+  }
+  if (data.error) {
+    return { error: data.error };
+  }
+  if (!data.swapTransaction) {
+    return { error: "No swapTransaction in response" };
+  }
+  return { swapTransaction: data.swapTransaction };
+}
+
+/**
+ * Sign and send a Swap API v1 transaction (single atomic swap).
+ */
+export async function executeSwapV1(
+  swapTransactionBase64: string,
+  wallet: Keypair
+): Promise<{ signature: string } | { error: string }> {
+  try {
+    const txBuf = Buffer.from(swapTransactionBase64, "base64");
+    const tx = VersionedTransaction.deserialize(txBuf);
+    tx.sign([wallet]);
+    const connection = new Connection(RPC_URL, { fetch: proxyFetch as any });
+    const sig = await connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: false,
+      maxRetries: 3,
+    });
+    return { signature: sig };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { error: msg };
+  }
 }
 
 /**

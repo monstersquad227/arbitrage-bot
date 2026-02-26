@@ -31,12 +31,6 @@ function buildPath(corner1Mint: string, corner2Mint: string): string {
   return `USDC->${l1}->${l2}->USDC`;
 }
 
-/** 按代币精度格式化数量：SOL 9 位，其余 6 位 */
-function amountByToken(tokenLabel: string, rawAmount: string): string {
-  const n = Number(rawAmount);
-  return tokenLabel === "SOL" ? (n / 1e9).toFixed(9) : (n / 1e6).toFixed(6);
-}
-
 async function main(): Promise<void> {
   const wallet = getWallet();
   const taker = wallet.publicKey.toBase58();
@@ -107,8 +101,6 @@ async function main(): Promise<void> {
       if (opp) {
         logOpportunity(opp);
         const path = buildPath(opp.corner1Mint, opp.corner2Mint);
-        const l1 = MINT_LABEL[opp.corner1Mint] ?? "?";
-        const l2 = MINT_LABEL[opp.corner2Mint] ?? "?";
 
         let opportunityId: number | null = null;
         if (isDbEnabled() && scanId !== null) {
@@ -147,48 +139,22 @@ async function main(): Promise<void> {
 
         const result = await runArbitrage(wallet, opp);
         const executionEnd = new Date();
-        const success = result.step1 && result.step2 && result.step3;
+        const success = result.success;
 
         if (isDbEnabled() && executionId !== null) {
           try {
             await updateExecution(executionId, executionEnd, success ? "SUCCESS" : "FAILED", {
-              errorMessage: success ? null : (result.errorMessage ?? (result.step1 === false ? "Step1 failed" : result.step2 === false ? "Step2 failed" : "Step3 failed")),
+              errorMessage: success ? null : (result.errorMessage ?? "Execution failed"),
             });
-            const step1Input = TRADE_AMOUNT_USDC.toString();
-            const step1Output = amountByToken(l1, opp.step1OutAmount);
-            const step2Input = step1Output;
-            const step2Output = amountByToken(l2, opp.step2OutAmount);
-            const step3Input = step2Output;
-            const step3Output = formatUsdc(opp.expectedSolBack);
             await insertTx(
               executionId,
               1,
               "USDC",
-              l1,
-              step1Input,
-              step1Output,
-              result.signature1 ?? "",
-              result.step1 ? "SUCCESS" : "FAILED"
-            );
-            await insertTx(
-              executionId,
-              2,
-              l1,
-              l2,
-              step2Input,
-              step2Output,
-              result.signature2 ?? "",
-              result.step2 ? "SUCCESS" : "FAILED"
-            );
-            await insertTx(
-              executionId,
-              3,
-              l2,
               "USDC",
-              step3Input,
-              step3Output,
-              result.signature3 ?? "",
-              result.step3 ? "SUCCESS" : "FAILED"
+              TRADE_AMOUNT_USDC.toString(),
+              formatUsdc(opp.expectedSolBack),
+              result.signature ?? "",
+              success ? "SUCCESS" : "FAILED"
             );
           } catch (e) {
             console.error("[DB] updateExecution/insertTx failed:", e);
@@ -203,8 +169,8 @@ async function main(): Promise<void> {
           }
         }
 
-        if (success) {
-          console.log("交易已上链:", result.signature1, result.signature2, result.signature3);
+        if (success && result.signature) {
+          console.log("交易已上链:", result.signature);
         }
       } else {
         console.log("  本轮未发现满足条件的套利机会");
