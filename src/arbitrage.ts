@@ -138,19 +138,18 @@ export async function findOpportunity(
 
 /**
  * Execute triangular arbitrage: USDC → corner1 → corner2 → USDC (3 swaps).
- * Step2/Step3 订单在前一步成功后再请求，避免 Jupiter 报 Insufficient funds。
+ * Step1 在执行前重新要价，避免使用扫描阶段的陈旧订单导致 "Slippage tolerance exceeded"。
+ * Step2/Step3 在前一步成功后再请求，避免 Jupiter 报 Insufficient funds。
  */
 export async function runArbitrage(
   wallet: Keypair,
   opp: ArbitrageOpportunity
-): Promise<{ step1: boolean; step2: boolean; step3: boolean; signature1?: string; signature2?: string; signature3?: string }> {
-  if (!opp.order1.transaction) {
-    return { step1: false, step2: false, step3: false };
-  }
-
+): Promise<{ step1: boolean; step2: boolean; step3: boolean; signature1?: string; signature2?: string; signature3?: string; errorMessage?: string }> {
   const taker = wallet.publicKey.toBase58();
   const l1 = mintLabel(opp.corner1Mint);
   const l2 = mintLabel(opp.corner2Mint);
+  const fail = (step: string, detail: string) => `${step}: ${detail}`;
+
   console.log("");
   console.log("========== 执行三角套利 ==========");
   console.log(
@@ -158,16 +157,31 @@ export async function runArbitrage(
       opp.profitRaw
     )} USDC (${opp.profitBps} bps)`
   );
+
+  // Step1 执行前重新要价，避免扫描阶段报价过期导致链上滑点失败
+  console.log("  Step1: 请求订单（USDC → " + l1 + "）...");
+  const order1Fresh = await getOrder({
+    inputMint: USDC_MINT,
+    outputMint: opp.corner1Mint,
+    amount: TRADE_AMOUNT_RAW,
+    taker,
+  });
+  if ("error" in order1Fresh || !order1Fresh.transaction) {
+    const msg = "error" in order1Fresh ? order1Fresh.error : "无 transaction";
+    console.error("  Step1 订单请求失败:", msg);
+    return { step1: false, step2: false, step3: false, errorMessage: fail("Step1订单请求失败", msg) };
+  }
   console.log("  Step1: 提交 USDC → " + l1 + " ...");
   const exec1 = await executeOrder(
-    opp.order1.requestId,
-    opp.order1.transaction,
+    order1Fresh.requestId,
+    order1Fresh.transaction,
     wallet
   );
 
   if (exec1.status !== "Success" || !exec1.signature) {
-    console.error("  Step1 失败:", exec1.error ?? exec1);
-    return { step1: false, step2: false, step3: false };
+    const msg = exec1.error ?? String(exec1);
+    console.error("  Step1 失败:", msg);
+    return { step1: false, step2: false, step3: false, errorMessage: fail("Step1执行失败", msg) };
   }
   console.log("  Step1 成功:", exec1.signature);
 
@@ -177,20 +191,21 @@ export async function runArbitrage(
     const step2Order = await getOrder({
       inputMint: opp.corner1Mint,
       outputMint: opp.corner2Mint,
-      // 使用 Step1 订单中保证的最小输出量，避免由于实际到账略小于预估 outAmount 导致 Insufficient funds
-      amount: BigInt(opp.order1.otherAmountThreshold ?? opp.step1OutAmount),
+      // 使用本次执行 Step1 订单的最小输出量，避免实际到账略小于预估导致 Insufficient funds
+      amount: BigInt(order1Fresh.otherAmountThreshold ?? order1Fresh.outAmount),
       taker,
     });
     if ("error" in step2Order || !step2Order.transaction) {
-      console.error("  Step2 订单请求失败:", "error" in step2Order ? step2Order.error : "无 transaction");
-      return { step1: true, step2: false, step3: false, signature1: exec1.signature };
+      const msg = "error" in step2Order ? step2Order.error : "无 transaction";
+      console.error("  Step2 订单请求失败:", msg);
+      return { step1: true, step2: false, step3: false, signature1: exec1.signature, errorMessage: fail("Step2订单请求失败", msg) };
     }
     order2 = step2Order;
   }
 
   if (!order2.transaction) {
     console.error("  Step2 无有效 transaction");
-    return { step1: true, step2: false, step3: false, signature1: exec1.signature };
+    return { step1: true, step2: false, step3: false, signature1: exec1.signature, errorMessage: fail("Step2", "无有效 transaction") };
   }
   console.log("  Step2: 提交 " + l1 + " → " + l2 + " ...");
   const exec2 = await executeOrder(
@@ -200,8 +215,9 @@ export async function runArbitrage(
   );
 
   if (exec2.status !== "Success" || !exec2.signature) {
-    console.error("  Step2 失败:", exec2.error ?? exec2);
-    return { step1: true, step2: false, step3: false, signature1: exec1.signature };
+    const msg = exec2.error ?? String(exec2);
+    console.error("  Step2 失败:", msg);
+    return { step1: true, step2: false, step3: false, signature1: exec1.signature, errorMessage: fail("Step2执行失败", msg) };
   }
   console.log("  Step2 成功:", exec2.signature);
 
@@ -221,8 +237,9 @@ export async function runArbitrage(
     slippageBps: STEP3_SLIPPAGE_BPS,
   });
   if ("error" in step3Order || !step3Order.transaction) {
-    console.error("  Step3 订单请求失败:", "error" in step3Order ? step3Order.error : "无 transaction");
-    return { step1: true, step2: true, step3: false, signature1: exec1.signature, signature2: exec2.signature };
+    const msg = "error" in step3Order ? step3Order.error : "无 transaction";
+    console.error("  Step3 订单请求失败:", msg);
+    return { step1: true, step2: true, step3: false, signature1: exec1.signature, signature2: exec2.signature, errorMessage: fail("Step3订单请求失败", msg) };
   }
   console.log("  Step3: 提交 " + l2 + " → USDC ...");
   const exec3 = await executeOrder(
@@ -232,8 +249,9 @@ export async function runArbitrage(
   );
 
   if (exec3.status !== "Success") {
-    console.error("  Step3 失败:", exec3.error ?? exec3);
-    return { step1: true, step2: true, step3: false, signature1: exec1.signature, signature2: exec2.signature };
+    const msg = exec3.error ?? String(exec3);
+    console.error("  Step3 失败:", msg);
+    return { step1: true, step2: true, step3: false, signature1: exec1.signature, signature2: exec2.signature, errorMessage: fail("Step3执行失败", msg) };
   }
   console.log("  Step3 成功:", exec3.signature);
   console.log("========== 三角套利完成 ==========");

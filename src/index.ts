@@ -141,7 +141,7 @@ async function main(): Promise<void> {
         if (isDbEnabled() && executionId !== null) {
           try {
             await updateExecution(executionId, executionEnd, success ? "SUCCESS" : "FAILED", {
-              errorMessage: success ? null : (result.step1 === false ? "Step1 failed" : result.step2 === false ? "Step2 failed" : "Step3 failed"),
+              errorMessage: success ? null : (result.errorMessage ?? (result.step1 === false ? "Step1 failed" : result.step2 === false ? "Step2 failed" : "Step3 failed")),
             });
             const step1Input = TRADE_AMOUNT_USDC.toString();
             const step1Output = amountByToken(l1, opp.step1OutAmount);
