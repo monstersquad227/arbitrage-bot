@@ -61,16 +61,22 @@ export const USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
 export const USD1_MINT = "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB";
 /** LIT mint */
 export const LIT_MINT = "EicWvteVi2fWepEzS3FYWsnuPoP6caZfjnKqNvydLjCH";
+/** ONyc mint */
+export const ONYC_MINT = "5Y8NV33Vv7WbnLfq3zBcKSdYPrk7g2KoiQoe7M2tcxp5";
+/** JitoSOL mint */
+export const JITOSOL_MINT = "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn";
 
 /**
  * 三角套利 USDC -> corner1 -> corner2 -> USDC 的角代币集合（不含 USDC 本身）。
- * 按 PART4 要求重置为: USD1, WSOL, USDT, LIT。
+ * PART4: USD1, WSOL, USDT, LIT, ONyc, JitoSOL。
  */
 export const CORNER_MINTS = [
   USD1_MINT,
   SOL_MINT,
   USDT_MINT,
   LIT_MINT,
+  ONYC_MINT,
+  JITOSOL_MINT,
 ];
 
 /** Mint -> 显示名称（用于日志） */
@@ -80,6 +86,8 @@ export const MINT_LABEL: Record<string, string> = {
   [USDT_MINT]: "USDT",
   [USD1_MINT]: "USD1",
   [LIT_MINT]: "LIT",
+  [ONYC_MINT]: "ONyc",
+  [JITOSOL_MINT]: "JitoSOL",
 };
 
 export function getMinProfitRaw(): bigint {

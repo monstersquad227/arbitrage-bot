@@ -253,10 +253,100 @@ async function runArbitrageSingleTxFromThreeQuotes(
 }
 
 /**
+ * Fallback: execute triangular arbitrage using 3 separate Ultra API orders (non-atomic).
+ */
+async function runArbitrageThreeTx(
+  wallet: Keypair,
+  opp: ArbitrageOpportunity
+): Promise<{ success: boolean; signature?: string; errorMessage?: string }> {
+  const taker = wallet.publicKey.toBase58();
+  const l1 = mintLabel(opp.corner1Mint);
+  const l2 = mintLabel(opp.corner2Mint);
+
+  console.log("  [Fallback] 使用 3 笔独立交易 (Ultra API)...");
+
+  try {
+    // Step1: USDC -> corner1
+    const order1 = await getOrder({
+      inputMint: USDC_MINT,
+      outputMint: opp.corner1Mint,
+      amount: TRADE_AMOUNT_RAW,
+      taker,
+    });
+    if ("error" in order1 || !order1.transaction) {
+      const msg = "error" in order1 ? order1.error : "Step1 无 transaction";
+      return { success: false, errorMessage: `Step1 报价失败: ${msg}` };
+    }
+    console.log(`  Step1: 提交 USDC → ${l1} ...`);
+    const exec1 = await executeOrder(order1.requestId, order1.transaction, wallet);
+    if (exec1.status !== "Success" || !exec1.signature) {
+      return {
+        success: false,
+        errorMessage: `Step1 执行失败: ${exec1.error ?? "unknown error"}`,
+      };
+    }
+    console.log(`  Step1 成功: ${exec1.signature}`);
+
+    const step1Out = BigInt(order1.outAmount);
+
+    // Step2: corner1 -> corner2
+    const order2 = await getOrder({
+      inputMint: opp.corner1Mint,
+      outputMint: opp.corner2Mint,
+      amount: step1Out,
+      taker,
+    });
+    if ("error" in order2 || !order2.transaction) {
+      const msg = "error" in order2 ? order2.error : "Step2 无 transaction";
+      return { success: false, errorMessage: `Step2 报价失败: ${msg}` };
+    }
+    console.log(`  Step2: 提交 ${l1} → ${l2} ...`);
+    const exec2 = await executeOrder(order2.requestId, order2.transaction, wallet);
+    if (exec2.status !== "Success" || !exec2.signature) {
+      return {
+        success: false,
+        errorMessage: `Step2 执行失败: ${exec2.error ?? "unknown error"}`,
+      };
+    }
+    console.log(`  Step2 成功: ${exec2.signature}`);
+
+    const step2Out = BigInt(order2.outAmount);
+
+    // Step3: corner2 -> USDC
+    const order3 = await getOrder({
+      inputMint: opp.corner2Mint,
+      outputMint: USDC_MINT,
+      amount: step2Out,
+      taker,
+    });
+    if ("error" in order3 || !order3.transaction) {
+      const msg = "error" in order3 ? order3.error : "Step3 无 transaction";
+      return { success: false, errorMessage: `Step3 报价失败: ${msg}` };
+    }
+    console.log(`  Step3: 提交 ${l2} → USDC ...`);
+    const exec3 = await executeOrder(order3.requestId, order3.transaction, wallet);
+    if (exec3.status !== "Success" || !exec3.signature) {
+      return {
+        success: false,
+        errorMessage: `Step3 执行失败: ${exec3.error ?? "unknown error"}`,
+      };
+    }
+    console.log(`  Step3 成功: ${exec3.signature}`);
+
+    const combinedSig = `${exec1.signature} ${exec2.signature} ${exec3.signature}`;
+    return { success: true, signature: combinedSig };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { success: false, errorMessage: msg };
+  }
+}
+
+/**
  * Execute triangular arbitrage: USDC → A → B → USDC.
  * Prefers single atomic TX via Jupiter Swap API v1 (same-mint quote); if API
- * rejects ("Input and output mints are not allowed to be equal"), falls back
- * to 3 separate TXs via Ultra API. Returns { success, signature } in both cases.
+ * rejects ("Input and output mints are not allowed to be equal"), first tries
+ * 3-leg atomic TX via Swap API v1 instructions, then falls back to 3 separate
+ * TXs via Ultra API. Returns { success, signature } in both cases.
  */
 export async function runArbitrage(
   wallet: Keypair,
@@ -287,8 +377,15 @@ export async function runArbitrage(
   if ("error" in quote) {
     const err = (quote as { error: string }).error;
     if (err.includes(SAME_MINT_ERROR)) {
-      console.log("  三角路径 (USDC→USDC) 不支持单笔报价，改用 3 段报价合并为单笔交易");
-      return runArbitrageSingleTxFromThreeQuotes(wallet, opp);
+      console.log("  三角路径 (USDC→USDC) 不支持单笔报价，尝试 3 段报价合并为单笔原子交易");
+      const atomicFromThree = await runArbitrageSingleTxFromThreeQuotes(wallet, opp);
+      if (!atomicFromThree.success) {
+        console.log(
+          `  3 段原子交易失败: ${atomicFromThree.errorMessage ?? "unknown error"}，改用 3 笔独立交易 (Ultra API)`
+        );
+        return runArbitrageThreeTx(wallet, opp);
+      }
+      return atomicFromThree;
     }
     console.error("  报价失败:", err);
     return { success: false, errorMessage: err };
