@@ -13,7 +13,7 @@ import {
   logOpportunity,
   formatUsdc,
 } from "./arbitrage.js";
-import { checkWalletBalance, formatSol } from "./balance.js";
+import { checkWalletBalance, formatSol, formatUsdcBalance } from "./balance.js";
 import {
   isDbEnabled,
   insertScan,
@@ -58,7 +58,8 @@ async function main(): Promise<void> {
     try {
       const balance = await checkWalletBalance(wallet.publicKey);
       const walletSolBalance = balance.solLamports / 1e9;
-      console.log("\n[预检查] 钱包余额: SOL", formatSol(balance.solLamports));
+      const walletUsdcBalance = balance.usdcRaw / 1e6;
+      console.log("\n[预检查] 钱包余额: SOL", formatSol(balance.solLamports), "| USDC", formatUsdcBalance(balance.usdcRaw));
       if (!balance.ok) {
         console.log("[预检查] 跳过本轮:", balance.message);
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
@@ -69,7 +70,7 @@ async function main(): Promise<void> {
       let scanId: number | null = null;
       if (isDbEnabled()) {
         try {
-          scanId = await insertScan(taker, walletSolBalance);
+          scanId = await insertScan(taker, walletSolBalance, walletUsdcBalance);
         } catch (e) {
           console.error("[DB] insertScan failed:", e);
         }

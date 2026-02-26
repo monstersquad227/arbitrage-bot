@@ -31,17 +31,18 @@ function getPool(): mysql.Pool {
   return pool;
 }
 
-/** 插入扫描记录，返回 scan_id */
+/** 插入扫描记录，返回 scan_id（含 SOL、USDC 余额） */
 export async function insertScan(
   walletAddress: string,
-  walletSolBalance: number | null
+  walletSolBalance: number | null,
+  walletUsdcBalance: number | null = null
 ): Promise<number> {
   const conn = await getPool().getConnection();
   try {
     const [result] = await conn.execute<mysql.ResultSetHeader>(
-      `INSERT INTO arbitrage_scan (wallet_address, wallet_sol_balance, scan_start_time)
-       VALUES (?, ?, NOW(6))`,
-      [walletAddress, walletSolBalance]
+      `INSERT INTO arbitrage_scan (wallet_address, wallet_sol_balance, wallet_usdc_balance, scan_start_time)
+       VALUES (?, ?, ?, NOW(6))`,
+      [walletAddress, walletSolBalance, walletUsdcBalance]
     );
     return result.insertId;
   } finally {
