@@ -16,6 +16,7 @@ import {
   getMinProfitRaw,
   MINT_LABEL,
   TRADE_AMOUNT_RAW,
+  TRADE_AMOUNT_USDC,
   RPC_URL,
   STEP3_AMOUNT_BUFFER_BPS,
   STEP3_SLIPPAGE_BPS,
@@ -74,7 +75,7 @@ async function scanOnePath(
   }
 
   const step1OutRaw = BigInt(order1.outAmount);
-  console.log(`    Step1 报价: 1.99 USDC → ${order1.outAmount} ${l1} (raw)`);
+  console.log(`    Step1 报价: ${TRADE_AMOUNT_USDC} USDC → ${order1.outAmount} ${l1} (raw)`);
 
   const quote2 = await getQuote({
     inputMint: c1,
@@ -110,7 +111,7 @@ async function scanOnePath(
     `    Step3 报价: ${quote2.outAmount} ${l2} → ${formatUsdc(expectedUsdcBack)} USDC (最少)`
   );
   console.log(
-    `     round-trip: 投入 1.99 USDC → 收回 ${formatUsdc(expectedUsdcBack)} USDC | 利润 ${formatUsdc(profitRaw)} USDC (${profitBps} bps)`
+    `     round-trip: 投入 ${TRADE_AMOUNT_USDC} USDC → 收回 ${formatUsdc(expectedUsdcBack)} USDC | 利润 ${formatUsdc(profitRaw)} USDC (${profitBps} bps)`
   );
 
   if (profitRaw < minProfitRaw) {
