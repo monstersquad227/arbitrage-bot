@@ -6,6 +6,8 @@ import {
   getMinProfitRaw,
   MINT_LABEL,
   TRADE_AMOUNT_RAW,
+  STEP3_AMOUNT_BUFFER_BPS,
+  STEP3_SLIPPAGE_BPS,
 } from "./config.js";
 import type { JupiterOrderResponse } from "./types.js";
 
@@ -203,16 +205,20 @@ export async function runArbitrage(
   }
   console.log("  Step2 成功:", exec2.signature);
 
-  // Step3: corner2 → USDC（需用 Step2 实际输出量请求，此处用扫描时的 step2OutAmount 近似）
-  // 优先使用 Step2 订单的最小保证输出量，其次是预估 outAmount，最后退回扫描阶段的估算值
-  const step2OutForOrder =
+  // Step3: corner2 → USDC
+  // 用 Step2 的（最小）输出量请求；若用「报价量」请求，Step2 实际到账可能略少（其自身滑点），
+  // 导致 Step3 实际换得的 USDC 低于订单里的最低保护 → "Slippage tolerance exceeded"。
+  // 故对 Step3 的 input 打一个折扣（STEP3_AMOUNT_BUFFER），按略少数量要价，更容易满足链上最低输出。
+  const step2OutRaw =
     order2.otherAmountThreshold ?? order2.outAmount ?? opp.step2OutAmount;
+  const step3AmountRaw = (BigInt(step2OutRaw) * BigInt(STEP3_AMOUNT_BUFFER_BPS)) / BigInt(10_000);
   console.log("  Step3: 请求订单（" + l2 + " → USDC）...");
   const step3Order = await getOrder({
     inputMint: opp.corner2Mint,
     outputMint: USDC_MINT,
-    amount: BigInt(step2OutForOrder),
+    amount: step3AmountRaw,
     taker,
+    slippageBps: STEP3_SLIPPAGE_BPS,
   });
   if ("error" in step3Order || !step3Order.transaction) {
     console.error("  Step3 订单请求失败:", "error" in step3Order ? step3Order.error : "无 transaction");

@@ -25,6 +25,11 @@ export const TRADE_AMOUNT_RAW = BigInt(
  */
 export const MAX_SLIPPAGE_BPS = Number(process.env.MAX_SLIPPAGE_BPS) || 3;
 
+/** Step3 请求数量缓冲：按 Step2 输出的比例请求（bps，默认 9950 = 99.5%），避免 Step2 实际到账略少导致 Step3 滑点失败 */
+export const STEP3_AMOUNT_BUFFER_BPS = Number(process.env.STEP3_AMOUNT_BUFFER_BPS) || 9950;
+/** Step3 单独滑点（bps），略大于全局以降低 "Slippage tolerance exceeded"（默认 8 = 0.08%） */
+export const STEP3_SLIPPAGE_BPS = Number(process.env.STEP3_SLIPPAGE_BPS) || 8;
+
 export const JUPITER_API_BASE = "https://api.jup.ag/ultra/v1";
 /** Swap Quote API（仅报价，不校验钱包余额，用于扫描阶段 Step2 估算） */
 export const JUPITER_QUOTE_API_BASE = "https://api.jup.ag/swap/v1";
