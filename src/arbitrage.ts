@@ -27,17 +27,24 @@ function mintLabel(mint: string): string {
   return MINT_LABEL[mint] ?? `${mint.slice(0, 8)}…`;
 }
 
+export interface FindOpportunityResult {
+  opportunity: ArbitrageOpportunity | null;
+  scannedPaths: number;
+}
+
 /**
  * 三角套利 USDC -> corner1 -> corner2 -> USDC，检查是否满足最低利润 (0.1%)。
  */
 export async function findOpportunity(
   taker: string
-): Promise<ArbitrageOpportunity | null> {
+): Promise<FindOpportunityResult> {
   const minProfitRaw = getMinProfitRaw();
+  let scannedPaths = 0;
 
   for (const c1 of CORNER_MINTS) {
     for (const c2 of CORNER_MINTS) {
       if (c1 === c2) continue;
+      scannedPaths++;
       const l1 = mintLabel(c1);
       const l2 = mintLabel(c2);
       console.log(`  尝试路径: USDC → ${l1} → ${l2} → USDC`);
@@ -107,21 +114,24 @@ export async function findOpportunity(
 
       console.log(`    ✓ 发现套利机会`);
       return {
-        corner1Mint: c1,
-        corner2Mint: c2,
-        step1OutAmount: order1.outAmount,
-        step2OutAmount: quote2.outAmount,
-        expectedSolBack: expectedUsdcBack,
-        profitRaw,
-        profitBps,
-        order1: order1 as JupiterOrderResponse,
-        order2: undefined,
-        order3: undefined,
+        opportunity: {
+          corner1Mint: c1,
+          corner2Mint: c2,
+          step1OutAmount: order1.outAmount,
+          step2OutAmount: quote2.outAmount,
+          expectedSolBack: expectedUsdcBack,
+          profitRaw,
+          profitBps,
+          order1: order1 as JupiterOrderResponse,
+          order2: undefined,
+          order3: undefined,
+        },
+        scannedPaths,
       };
     }
   }
 
-  return null;
+  return { opportunity: null, scannedPaths };
 }
 
 /**

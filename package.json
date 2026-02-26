@@ -11,6 +11,7 @@
     "arb": "tsc && node dist/index.js"
   },
   "dependencies": {
+    "mysql2": "^3.11.0",
     "@solana/web3.js": "^1.95.3",
     "bs58": "^6.0.0",
     "dotenv": "^16.4.5",
